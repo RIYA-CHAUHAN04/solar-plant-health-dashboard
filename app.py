@@ -1,6 +1,24 @@
 import streamlit as st
 import pandas as pd
 
+from data_processing import process_plant_1_data
+from anomaly_detection import detect_solar_anomalies
+
+@st.cache_data
+def load_plant_data():
+    df, _ = process_plant_1_data(how="left")
+    analyzed_df, summary = detect_solar_anomalies(df)
+    return analyzed_df, summary
+
+try:
+    plant_df, anomaly_summary = load_plant_data()
+    data_loaded = True
+except Exception as e:
+    plant_df = pd.DataFrame()
+    anomaly_summary = {}
+    data_loaded = False
+    st.error(f"Could not load plant data: {e}")
+
 # Page setup
 st.set_page_config(
     page_title="Solar Plant Health Dashboard",
@@ -100,3 +118,45 @@ elif actual_generation < expected_generation * 0.9:
     st.warning("⚠️ Alert: Actual generation is below expected generation.")
 else:
     st.success("✅ No performance alert. Generation is within the expected range.")
+
+# --- Section 5: Real Plant Data & Anomaly Detection ---
+st.divider()
+st.header("🔍 Real Plant Data & Anomaly Detection")
+
+if data_loaded:
+    st.success("Plant 1 dataset loaded successfully.")
+
+    total_records = anomaly_summary["total_records_analyzed"]
+    total_anomalies = anomaly_summary["anomalous_records_count"]
+    anomaly_rate = anomaly_summary["anomaly_rate_percent"]
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Readings Analyzed", f"{total_records:,}")
+    col2.metric("Detected Anomalies", f"{total_anomalies:,}")
+    col3.metric("Anomaly Rate", f"{anomaly_rate:.2f}%")
+
+    st.subheader("Inverter Health Status")
+    health_counts = (
+        plant_df["HEALTH_STATUS"]
+        .value_counts()
+        .rename_axis("Health Status")
+        .reset_index(name="Readings")
+    )
+    st.dataframe(health_counts, width="stretch", hide_index=True)
+
+    st.subheader("Recent Anomaly Records")
+    anomalies = plant_df[plant_df["IS_ANOMALOUS"]].copy()
+    display_columns = [
+        "DATE_TIME",
+        "SOURCE_KEY",
+        "AC_POWER",
+        "IRRADIATION",
+        "HEALTH_STATUS",
+    ]
+    st.dataframe(
+        anomalies[display_columns].head(20),
+        width="stretch",
+        hide_index=True,
+    )
+else:
+    st.warning("Real plant data could not be loaded. Check the error shown above.")
