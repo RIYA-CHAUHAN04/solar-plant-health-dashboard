@@ -1,0 +1,6 @@
+{
+  "name": "SolarWatch: Solar Plant Health Dashboard",
+  "description": "Solar power plant inverter health dashboard comparing actual vs expected AC power, detecting anomalies, and calculating energy loss.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
