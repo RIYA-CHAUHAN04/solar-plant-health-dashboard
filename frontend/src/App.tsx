@@ -67,8 +67,8 @@ export default function App() {
     const loadPlantData = async () => {
       try {
         const response = await fetch(
-          'http://127.0.0.1:8000/api/plant-data'
-        );
+  'https://solar-plant-health-api.onrender.com/api/plant-data'
+);
 
         if (!response.ok) {
           throw new Error(`API error: ${response.status}`);
