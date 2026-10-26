@@ -155,7 +155,13 @@ export default function App() {
   }, [rawRecords]);
 
   // Dynamically re-evaluate anomalies based on sensitivity threshold
-  const recordsWithSensitivity = useMemo(() => {
+   const recordsWithSensitivity = useMemo(() => {
+    // Keep backend anomaly labels for the real plant dataset.
+    // Custom uploaded data uses the frontend sensitivity logic.
+    if (!isUsingCustomData) {
+      return rawRecords;
+    }
+
     return rawRecords.map((r) => {
       const evaluated = evaluateAnomaly(
         r.acPower,
@@ -166,9 +172,13 @@ export default function App() {
       );
 
       let lossKwh = 0;
+
       if (r.expectedPower > r.acPower && r.expectedPower > 1.0) {
-        lossKwh = Number(((r.expectedPower - r.acPower) * 0.25).toFixed(3));
+        lossKwh = Number(
+          ((r.expectedPower - r.acPower) * 0.25).toFixed(3)
+        );
       }
+
       if (r.expectedPower <= 0.1) {
         lossKwh = 0;
       }
@@ -181,8 +191,9 @@ export default function App() {
         energyLossKwh: lossKwh,
       };
     });
-  }, [rawRecords, filters.sensitivity]);
+  }, [rawRecords, filters.sensitivity, isUsingCustomData]);
 
+    
   // Date filtering
   const dateFilteredRecords = useMemo(() => {
     const [startStr, endStr] = filters.dateRange;
