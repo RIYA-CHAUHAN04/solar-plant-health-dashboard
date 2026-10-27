@@ -15,6 +15,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
          "https://solar-plant-health-dashboard-5nqws3qiu-codecraze3.vercel.app",
+         "https://solar-plant-health-dashboard-239y0lnl3-codecraze3.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
