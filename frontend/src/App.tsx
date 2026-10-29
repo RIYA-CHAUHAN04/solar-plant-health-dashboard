@@ -15,6 +15,7 @@ import {
   ChevronDown,
   Layers,
   Sparkles,
+  UserRound,
 } from 'lucide-react';
 import {
   SolarRecord,
@@ -51,6 +52,8 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [globalSearch, setGlobalSearch] = useState<string>('');
+  const [userName, setUserName] = useState<string>('');
+const [showProfileMenu, setShowProfileMenu] = useState<boolean>(false);
 
   // Core filters state
   const [filters, setFilters] = useState<FilterState>({
@@ -444,12 +447,68 @@ export default function App() {
             <span>Upload CSV</span>
           </button>
 
-          {/* User Profile Avatar Pill matching "SJ" */}
-          <div
-            className="w-9 h-9 rounded-full bg-gradient-to-br from-teal-400 via-emerald-400 to-cyan-300 text-neutral-950 font-extrabold text-xs flex items-center justify-center shadow-[0_0_15px_rgba(45,212,191,0.5)] cursor-pointer transform hover:scale-105 transition-transform"
-            title="Solar Plant Operator (SJ)"
-          >
-            SJ
+                  {/* User Profile Avatar */}
+          <div className="relative">
+            
+<button
+  type="button"
+  onClick={() => setShowProfileMenu((prev) => !prev)}
+  className="relative z-[60] pointer-events-auto w-9 h-9 rounded-full bg-gradient-to-br from-teal-400 via-emerald-400 to-cyan-300 text-neutral-950 font-extrabold text-xs flex items-center justify-center shadow-[0_0_15px_rgba(45,212,191,0.5)] cursor-pointer hover:scale-105 transition-transform"
+  title={userName || 'Sign In'}
+  aria-label="User profile menu"
+>
+  {userName
+    ? userName.trim().split(/\s+/).slice(0, 2)
+        .map((part) => part[0]?.toUpperCase()).join('')
+    : <UserRound size={16} />}
+</button>
+
+
+            {showProfileMenu && (
+              <div className="absolute right-0 top-12 z-[60] w-48 rounded-xl border border-teal-500/30 bg-[#0a232b] p-2 shadow-xl">
+                {!userName ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+  const name = window.prompt('Enter your full name');
+
+  if (name !== null && name.trim() !== '') {
+    setUserName(name.trim());
+  }
+
+  setShowProfileMenu(false);
+}}
+                    className="w-full rounded-lg px-3 py-2 text-left text-sm text-teal-200 hover:bg-teal-900/40"
+                  >
+                    Sign In
+                  </button>
+                ) : (
+                  <>
+                    <p className="px-3 py-2 text-sm text-white">{userName}</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowProfileMenu(false);
+                        handleTabChange('settings');
+                      }}
+                      className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-200 hover:bg-teal-900/40"
+                    >
+                      Settings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUserName('');
+                        setShowProfileMenu(false);
+                      }}
+                      className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-200 hover:bg-teal-900/40"
+                    >
+                      Sign Out
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </header>
