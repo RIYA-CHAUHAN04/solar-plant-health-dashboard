@@ -369,15 +369,54 @@ export default function App() {
 
         {/* Right Zone Controls: Date selector, Inverter selector, Avatar */}
         <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
-          {/* Date Range Selector Pill */}
-          <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#0a232b]/80 border border-teal-500/35 text-xs text-white font-semibold shadow-xs">
-            <Calendar className="w-3.5 h-3.5 text-teal-300" />
-            <span className="hidden md:inline font-mono">
-              {filters.dateRange[0]} – {filters.dateRange[1]}
-            </span>
-            <span className="md:hidden font-mono">7 Days</span>
-            <ChevronDown className="w-3.5 h-3.5 text-teal-400" />
-          </div>
+
+
+
+<div className="flex items-center gap-2">
+  <Calendar className="w-4 h-4 text-teal-300" />
+
+  <input
+    type="date"
+    aria-label="Start date"
+    min={availableDates.min}
+    max={availableDates.max}
+    value={filters.dateRange[0]}
+    onChange={(e) => {
+      const start = e.target.value;
+      if (start) {
+        handleFilterChange({
+          dateRange: [
+            start,
+            start > filters.dateRange[1]
+              ? start
+              : filters.dateRange[1],
+          ],
+        });
+      }
+    }}
+    className="w-36 rounded-lg border border-teal-500/40 bg-[#0a232b] px-2 py-2 text-xs text-white"
+  />
+
+  <span className="text-teal-300">to</span>
+
+  <input
+    type="date"
+    aria-label="End date"
+    min={filters.dateRange[0]}
+    max={availableDates.max}
+    value={filters.dateRange[1]}
+    onChange={(e) => {
+      const end = e.target.value;
+      if (end) {
+        handleFilterChange({
+          dateRange: [filters.dateRange[0], end],
+        });
+      }
+    }}
+    className="w-36 rounded-lg border border-teal-500/40 bg-[#0a232b] px-2 py-2 text-xs text-white"
+  />
+</div>
+
 
           {/* Inverter Selector Pill */}
           <div className="relative">
