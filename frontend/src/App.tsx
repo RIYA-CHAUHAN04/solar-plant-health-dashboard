@@ -195,14 +195,38 @@ export default function App() {
   }, [rawRecords, filters.sensitivity, isUsingCustomData]);
 
     
-  // Date filtering
+  
+  
+  // Date, fault, and search filtering
   const dateFilteredRecords = useMemo(() => {
     const [startStr, endStr] = filters.dateRange;
+    const query = globalSearch.trim().toLowerCase();
+
     return recordsWithSensitivity.filter((r) => {
       const datePart = r.dateTime.substring(0, 10);
-      return datePart >= startStr && datePart <= endStr;
+
+      const matchesDate =
+        datePart >= startStr && datePart <= endStr;
+
+      const matchesFault =
+        !filters.showFaultsOnly || r.isAnomaly;
+
+      const matchesSearch =
+        !query ||
+        r.sourceKey.toLowerCase().includes(query) ||
+        r.dateTime.toLowerCase().includes(query) ||
+        (r.anomalyReason || '').toLowerCase().includes(query);
+
+      return matchesDate && matchesFault && matchesSearch;
     });
-  }, [recordsWithSensitivity, filters.dateRange]);
+  }, [
+    recordsWithSensitivity,
+    filters.dateRange,
+    filters.showFaultsOnly,
+    globalSearch,
+  ]);
+
+
 
   // Memoized aggregations
   const metrics = useMemo(() => {
@@ -326,8 +350,8 @@ export default function App() {
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
-
-          {/* Search bar from mockup */}
+          
+          {/* Global Search */}
           <div className="relative hidden sm:block w-72 lg:w-96">
             <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-teal-300" />
             <input
@@ -335,9 +359,12 @@ export default function App() {
               placeholder="Search by inverter ID, date or keyword..."
               value={globalSearch}
               onChange={(e) => setGlobalSearch(e.target.value)}
-              className="w-full bg-[#0a232b]/80 border border-teal-500/35 rounded-full pl-10 pr-4 py-2 text-xs text-white placeholder:text-neutral-400 focus:outline-none focus:border-teal-300 focus:ring-1 focus:ring-teal-400 shadow-[inset_0_1px_3px_rgba(0,0,0,0.3)]"
+              className="w-full bg-[#0a232b]/80 border border-teal-500/35 rounded-full pl-10 pr-4 py-2 text-xs text-white placeholder:text-neutral-400 focus:outline-none focus:border-teal-300 focus:ring-1 focus:ring-teal-400"
             />
           </div>
+
+
+        
         </div>
 
         {/* Right Zone Controls: Date selector, Inverter selector, Avatar */}
