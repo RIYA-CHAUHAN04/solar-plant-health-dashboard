@@ -60,3 +60,14 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #2dd4bf;
 }
+
+
+/* Disable animations and transitions on graphs/charts */
+.js-plotly-plot .plotly g.nsewdrag,
+.js-plotly-plot .plotly path,
+.js-plotly-plot .plotly .cartesianlayer path,
+canvas, 
+svg * {
+  transition: none !important;
+  animation: none !important;
+}
