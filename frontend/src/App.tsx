@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Solar Sense AI: Solar Plant Health Dashboard
  * High-brightness, luminous frosted glass UI with panoramic solar farm backdrop.
  */
@@ -42,6 +42,7 @@ import { AlertsTable } from './components/AlertsTable';
 import { UploadModal } from './components/UploadModal';
 import { HowItWorksFooter } from './components/HowItWorksFooter';
 import { SkeletonLoader } from './components/SkeletonLoader';
+import { SolarAssistant } from './components/SolarAssistant';
 
 export default function App() {
   const [rawRecords, setRawRecords] = useState<SolarRecord[]>([]);
@@ -78,48 +79,68 @@ const [showProfileMenu, setShowProfileMenu] = useState<boolean>(false);
           throw new Error(`API error: ${response.status}`);
         }
 
+
         const result = await response.json();
+
+        // Read dynamic sampling interval from API response (e.g. 0.25 for 15-min data)
+        const intervalH: number = Number(result.sampling_interval_hours ?? 0.25) || 0.25;
 
         const records: SolarRecord[] = result.data.map(
           (item: Record<string, any>) => {
-            const dateTime = String(item.DATE_TIME);
-            const timestamp = new Date(
-              dateTime.replace(' ', 'T')
-            ).getTime();
+            // Normalise datetime string to ISO-compatible format
+            const dateTime = String(item.DATE_TIME ?? '')
+              .replace('T', ' ').replace('Z', '').substring(0, 19);
+            const timestamp = new Date(dateTime.replace(' ', 'T')).getTime();
 
-            const acPower = Number(item.AC_POWER ?? 0);
-            const fleetMedian = Number(item.FLEET_AC_MEDIAN ?? 0);
+            const acPower = Math.max(0, Number(item.AC_POWER ?? 0));
 
-            // Fleet median is a comparison-based estimate,
-            // not a measured expected-power value.
-            const expectedPower = Math.max(acPower, fleetMedian);
+            // Use EXPECTED_POWER from backend (peer-median or irradiance model).
+            // Fall back to legacy FLEET_AC_MEDIAN if present, then to acPower.
+            const rawExp = item.EXPECTED_POWER ?? item.PEER_AC_MEDIAN ?? item.FLEET_AC_MEDIAN;
+            const expectedPower = rawExp != null ? Math.max(0, Number(rawExp)) : acPower;
 
             const status = String(item.HEALTH_STATUS ?? '');
             const isAnomaly = Boolean(item.IS_ANOMALOUS);
 
+            // Use pre-computed energy loss from backend, or derive from deficit x interval
+            const rawLoss = item.ENERGY_LOSS_KWH;
+            const energyLossKwh = rawLoss != null
+              ? Math.max(0, Number(rawLoss))
+              : Math.max(0, (expectedPower - acPower) * intervalH);
+
+            // Map severity string from backend
+            const rawSeverity = String(item.SEVERITY ?? '');
+            let severity: 'High' | 'Medium' | 'Low' | null = null;
+            if (isAnomaly) {
+              if (rawSeverity === 'High' || status === 'CRITICAL_INVERTER_TRIP' || status === 'MAJOR_EFFICIENCY_LOSS') {
+                severity = 'High';
+              } else if (rawSeverity === 'Low') {
+                severity = 'Low';
+              } else {
+                severity = 'Medium';
+              }
+            }
+
+            const anomalyReason = isAnomaly
+              ? String(item.ANOMALY_REASON || item.HEALTH_STATUS || '').trim()
+              : '';
+
             return {
               dateTime,
               timestamp,
-              sourceKey: String(item.SOURCE_KEY),
+              sourceKey: String(item.SOURCE_KEY ?? ''),
               acPower,
-              irradiation: item.IRRADIATION == null
-                ? null : Number(item.IRRADIATION),
-              ambientTemp: item.AMBIENT_TEMPERATURE == null
-                ? null : Number(item.AMBIENT_TEMPERATURE),
-              moduleTemp: item.MODULE_TEMPERATURE == null
-                ? null : Number(item.MODULE_TEMPERATURE),
+              dcPower: item.DC_POWER != null ? Number(item.DC_POWER) : null,
+              irradiation: item.IRRADIATION != null ? Number(item.IRRADIATION) : null,
+              ambientTemp: item.AMBIENT_TEMPERATURE != null ? Number(item.AMBIENT_TEMPERATURE) : null,
+              moduleTemp: item.MODULE_TEMPERATURE != null ? Number(item.MODULE_TEMPERATURE) : null,
               expectedPower,
               isAnomaly,
-              anomalyReason: isAnomaly ? status : '',
-              energyLossKwh: Math.max(
-                0,
-                (expectedPower - acPower) * 0.25
-              ),
-              severity: isAnomaly
-                ? status === 'CRITICAL_INVERTER_TRIP'
-                  ? 'High'
-                  : 'Medium'
-                : null,
+              anomalyReason,
+              energyLossKwh,
+              severity,
+              samplingIntervalHours: intervalH,
+              healthStatus: status,
             };
           }
         );
@@ -177,9 +198,13 @@ const [showProfileMenu, setShowProfileMenu] = useState<boolean>(false);
 
       let lossKwh = 0;
 
+      // Use the per-record sampling interval (set by parseSolarCsv or API)
+      const intervalH = (r.samplingIntervalHours && r.samplingIntervalHours > 0)
+        ? r.samplingIntervalHours : 0.25;
+
       if (r.expectedPower > r.acPower && r.expectedPower > 1.0) {
         lossKwh = Number(
-          ((r.expectedPower - r.acPower) * 0.25).toFixed(3)
+          ((r.expectedPower - r.acPower) * intervalH).toFixed(3)
         );
       }
 
@@ -604,6 +629,19 @@ const [showProfileMenu, setShowProfileMenu] = useState<boolean>(false);
         onClose={() => setIsUploadModalOpen(false)}
         onDataLoaded={handleDataLoaded}
         sensitivity={filters.sensitivity}
+      />
+
+      {/* Floating AI-powered SolarWatch Assistant */}
+      <SolarAssistant
+        metrics={metrics}
+        inverterSummaries={inverterSummaries}
+        anomalyAlerts={anomalyAlerts}
+        selectedInverter={filters.selectedInverter}
+        isUsingCustomData={isUsingCustomData}
+        dateRange={filters.dateRange}
+        totalRecords={dateFilteredRecords.length}
+        onSelectInverter={handleSelectInverter}
+        onSelectAlertTimestamp={handleSelectAlertTimestamp}
       />
     </div>
   );

@@ -15,8 +15,12 @@ export interface SolarRecord {
   expectedPower: number;        // Expected AC power (kW)
   isAnomaly: boolean;           // True if marked or detected as anomaly
   anomalyReason: string;        // Human-readable fault cause
-  energyLossKwh: number;        // Energy lost during the 15-min interval: max(0, expected - actual) * 0.25h
+  energyLossKwh: number;        // Energy lost during the interval in kWh
   severity: SeverityLevel | null;
+  dcPower?: number | null;      // Optional DC power in kW
+  powerDeficit?: number;        // max(0, expectedPower - acPower)
+  samplingIntervalHours?: number; // e.g. 0.25 for 15-min, 0.0833 for 5-min
+  healthStatus?: string;        // e.g. CRITICAL_INVERTER_TRIP, NORMAL_HEALTHY
 }
 
 export interface ChartDataPoint {
@@ -30,7 +34,7 @@ export interface ChartDataPoint {
   irradiation: number | null;
   moduleTemp: number | null;
   reportingCount: number;         // Number of inverters reporting at this timestamp
-  isLowReporting: boolean;        // reportingCount < 22
+  isLowReporting: boolean;        // reportingCount < total expected inverters
   isAnomaly: boolean;
   anomalyReason: string | null;
   isGap?: boolean;
@@ -79,4 +83,15 @@ export interface FilterState {
   sensitivity: number;          // 0.10 to 0.50 (threshold fraction: e.g. 0.25 = 25% shortfall)
   showFaultsOnly: boolean;
   showWeatherOverlay: boolean;
+}
+
+export interface ParseCsvResult {
+  success: boolean;
+  records?: SolarRecord[];
+  missingColumns?: string[];
+  error?: string;
+  rowCount?: number;
+  samplingIntervalHours?: number;
+  inverterCount?: number;
+  anomalyCount?: number;
 }

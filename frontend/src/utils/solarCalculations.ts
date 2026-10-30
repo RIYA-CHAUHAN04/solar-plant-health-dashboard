@@ -1,5 +1,7 @@
 /**
- * Data processing, anomaly detection, PV modeling, and CSV tools for SolarWatch
+ * Data processing, anomaly detection, PV modeling, and CSV tools for Solar Sense AI.
+ * Completely dynamic: supports custom CSVs, Plant 1, Plant 2, separate weather files,
+ * dynamic leave-one-out peer baselines, dynamic sampling intervals, and energy loss (kWh).
  */
 
 import Papa from 'papaparse';
@@ -10,7 +12,9 @@ import {
   AnomalyAlert,
   DashboardMetrics,
   SeverityLevel,
+  ParseCsvResult,
 } from '../types/solar';
+export type { ParseCsvResult } from '../types/solar';
 import { INVERTER_NAMES } from '../data/sampleDataset';
 
 /**
@@ -21,7 +25,7 @@ const TEMP_COEFFICIENT = 0.0038; // Power loss per °C above 25°C
 const REFERENCE_TEMP_C = 25.0;
 
 /**
- * Calculate expected power from irradiation and module temperature
+ * Calculate physical expected power from solar irradiance and module temperature.
  */
 export function calculateExpectedPower(
   irradiation: number | null,
@@ -38,8 +42,7 @@ export function calculateExpectedPower(
 }
 
 /**
- * Evaluate whether a reading constitutes an anomaly based on sensitivity threshold
- * Sensitivity is the fractional shortfall tolerance (e.g. 0.25 = 25% drop triggers alert)
+ * Evaluate whether an inverter reading constitutes an anomaly.
  */
 export function evaluateAnomaly(
   actualKw: number,
@@ -48,32 +51,42 @@ export function evaluateAnomaly(
   moduleTemp: number | null,
   sensitivity = 0.25
 ): { isAnomaly: boolean; reason: string; severity: SeverityLevel | null } {
-  // Night-time or negligible sunlight is NEVER treated as a fault
-  if (expectedKw <= 5.0 || (irradiation !== null && irradiation < 0.01)) {
+  // Nighttime or negligible sunlight is NEVER treated as a fault
+  if (isNaN(expectedKw) || expectedKw <= 5.0 || (irradiation !== null && irradiation < 0.01)) {
     return { isAnomaly: false, reason: '', severity: null };
   }
 
   const shortfall = expectedKw - actualKw;
   const shortfallRatio = shortfall / expectedKw;
 
+  if (actualKw <= 1.0 && expectedKw >= 30.0) {
+    return {
+      isAnomaly: true,
+      reason: 'Inverter Trip / AC Breaker Open: Zero generation during active daylight',
+      severity: 'High',
+    };
+  }
+
+  if (moduleTemp !== null && moduleTemp >= 52.0 && shortfallRatio >= 0.35) {
+    return {
+      isAnomaly: true,
+      reason: `Thermal Inverter Throttling: High heatsink temperature (${moduleTemp.toFixed(1)}°C)`,
+      severity: 'High',
+    };
+  }
+
   if (shortfallRatio >= sensitivity && shortfall >= 15.0) {
-    let reason = 'Significant power shortfall vs solar irradiance';
+    let reason = 'Significant power shortfall vs operational baseline';
     let severity: SeverityLevel = 'Low';
 
-    if (actualKw <= 1.0 && expectedKw > 50.0) {
-      reason = 'Inverter Trip / AC Breaker Open: Zero output under daylight';
-      severity = 'High';
-    } else if (moduleTemp !== null && moduleTemp >= 52.0 && shortfallRatio >= 0.35) {
-      reason = `Thermal Inverter Throttling: Heatsink high temp (${moduleTemp.toFixed(1)}°C)`;
-      severity = 'High';
+    if (shortfallRatio >= 0.40) {
+      reason = `Severe Inverter Underperformance: ${Math.round(shortfallRatio * 100)}% shortfall vs peer fleet`;
+      severity = shortfallRatio >= 0.60 ? 'High' : 'Medium';
     } else if (shortfallRatio >= 0.30 && shortfallRatio <= 0.38) {
-      reason = 'Possible String Disconnect: ~33% drop indicative of open DC string';
+      reason = 'Possible String Disconnect: ~33% drop indicative of open DC circuit';
       severity = 'Medium';
-    } else if (shortfallRatio >= 0.40) {
-      reason = 'Severe Soiling or Panel Shading: >40% shortfall under irradiance';
-      severity = shortfallRatio > 0.6 ? 'High' : 'Medium';
     } else {
-      reason = `Generation Derating: ${Math.round(shortfallRatio * 100)}% below expected model`;
+      reason = `Inverter Derating: ${Math.round(shortfallRatio * 100)}% below expected generation`;
       severity = 'Low';
     }
 
@@ -84,11 +97,12 @@ export function evaluateAnomaly(
 }
 
 /**
- * Filter and compute dashboard metrics from records
+ * Filter and compute dashboard metrics from records.
+ * Dynamically computes energy loss and generation in kWh based on each dataset's sampling interval.
  */
 export function computeDashboardMetrics(
   records: SolarRecord[],
-  totalKnownInverters = 22
+  totalKnownInverters?: number
 ): DashboardMetrics {
   let totalLoss = 0;
   let totalActual = 0;
@@ -99,9 +113,13 @@ export function computeDashboardMetrics(
 
   for (const r of records) {
     reportingInverterIds.add(r.sourceKey);
+    const intervalH = r.samplingIntervalHours && r.samplingIntervalHours > 0 ? r.samplingIntervalHours : 0.25;
+
     totalLoss += r.energyLossKwh;
-    totalActual += r.acPower * 0.25; // 15-min kWh
-    totalExpected += r.expectedPower * 0.25;
+    totalActual += r.acPower * intervalH;
+    if (!isNaN(r.expectedPower)) {
+      totalExpected += r.expectedPower * intervalH;
+    }
 
     if (r.isAnomaly) {
       faultCount++;
@@ -111,14 +129,18 @@ export function computeDashboardMetrics(
     timepointInverterCounts.set(r.timestamp, currentCount + 1);
   }
 
+  const invertersBaseline = totalKnownInverters && totalKnownInverters > 0
+    ? totalKnownInverters
+    : Math.max(reportingInverterIds.size, 1);
+
   let lowReportingCount = 0;
   for (const count of timepointInverterCounts.values()) {
-    if (count < totalKnownInverters) {
+    if (count < invertersBaseline) {
       lowReportingCount++;
     }
   }
 
-  // Plant health score: (totalActual / totalExpected) * 100 during daylight periods
+  // Plant health score: (totalActual / totalExpected) * 100
   let healthScore = 100;
   if (totalExpected > 0) {
     healthScore = Math.min(100, Math.max(0, (totalActual / totalExpected) * 100));
@@ -129,7 +151,7 @@ export function computeDashboardMetrics(
     totalFaultsCount: faultCount,
     plantHealthScore: Math.round(healthScore * 10) / 10,
     reportingInverters: reportingInverterIds.size,
-    totalInverters: Math.max(totalKnownInverters, reportingInverterIds.size),
+    totalInverters: Math.max(invertersBaseline, reportingInverterIds.size),
     totalActualEnergyKwh: Math.round(totalActual),
     totalExpectedEnergyKwh: Math.round(totalExpected),
     lowReportingTimestampsCount: lowReportingCount,
@@ -137,17 +159,16 @@ export function computeDashboardMetrics(
 }
 
 /**
- * Aggregate chart series for selected inverter (or entire plant sum)
- * Inserts null points for data gaps > 25 minutes
+ * Aggregate chart series for selected inverter (or entire plant sum).
+ * Inserts visible null gap points when readings are missing.
  */
 export function generateChartSeries(
   records: SolarRecord[],
   selectedInverter: string,
-  totalInvertersExpected = 22
+  totalInvertersExpected?: number
 ): ChartDataPoint[] {
   if (records.length === 0) return [];
 
-  // Filter by inverter if specific
   const filtered = selectedInverter === 'all'
     ? records
     : records.filter((r) => r.sourceKey === selectedInverter);
@@ -180,9 +201,11 @@ export function generateChartSeries(
       map.set(r.timestamp, entry);
     }
     entry.actuals.push(r.acPower);
-    entry.expecteds.push(r.expectedPower);
-    if (r.irradiation !== null) entry.irradiations.push(r.irradiation);
-    if (r.moduleTemp !== null) entry.moduleTemps.push(r.moduleTemp);
+    if (!isNaN(r.expectedPower)) {
+      entry.expecteds.push(r.expectedPower);
+    }
+    if (r.irradiation !== null && !isNaN(r.irradiation)) entry.irradiations.push(r.irradiation);
+    if (r.moduleTemp !== null && !isNaN(r.moduleTemp)) entry.moduleTemps.push(r.moduleTemp);
     entry.inverters.add(r.sourceKey);
     if (r.isAnomaly) {
       entry.anomalies.push({
@@ -192,17 +215,17 @@ export function generateChartSeries(
     }
   }
 
-  // Sort timestamps chronologically
   const sortedTimestamps = Array.from(map.keys()).sort((a, b) => a - b);
   const result: ChartDataPoint[] = [];
+
+  const expectedFleetCount = totalInvertersExpected || 22;
 
   for (let idx = 0; idx < sortedTimestamps.length; idx++) {
     const t = sortedTimestamps[idx];
     const prevT = idx > 0 ? sortedTimestamps[idx - 1] : null;
 
-    // Detect missing gap (> 25 minutes between consecutive readings)
-    // Show as visible gap in charts without plotting as 0 or fault
-    if (prevT !== null && t - prevT > 25 * 60 * 1000) {
+    // Detect data gap (> 35 minutes between consecutive readings)
+    if (prevT !== null && t - prevT > 35 * 60 * 1000) {
       const gapMidpoint = Math.floor((prevT + t) / 2);
       const gapDate = new Date(gapMidpoint);
       result.push({
@@ -218,7 +241,7 @@ export function generateChartSeries(
         reportingCount: 0,
         isLowReporting: false,
         isAnomaly: false,
-        anomalyReason: 'Data gap (no reporting data)',
+        anomalyReason: 'Data gap (no reporting telemetry)',
         isGap: true,
       });
     }
@@ -229,15 +252,16 @@ export function generateChartSeries(
     const formattedDate = dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' });
 
     let actualSum = 0;
-    let expectedSum = 0;
+    let expectedSum: number | null = null;
 
     if (selectedInverter === 'all') {
-      // Plant-level total is the sum across all reporting inverters
       actualSum = item.actuals.reduce((a, b) => a + b, 0);
-      expectedSum = item.expecteds.reduce((a, b) => a + b, 0);
+      if (item.expecteds.length > 0) {
+        expectedSum = item.expecteds.reduce((a, b) => a + b, 0);
+      }
     } else {
       actualSum = item.actuals[0] ?? 0;
-      expectedSum = item.expecteds[0] ?? 0;
+      expectedSum = item.expecteds.length > 0 ? (item.expecteds[0] ?? 0) : null;
     }
 
     const avgIrrad = item.irradiations.length > 0
@@ -248,9 +272,9 @@ export function generateChartSeries(
       ? Number((item.moduleTemps.reduce((a, b) => a + b, 0) / item.moduleTemps.length).toFixed(1))
       : null;
 
-    const shortfall = Math.max(0, expectedSum - actualSum);
+    const shortfall = expectedSum !== null ? Math.max(0, expectedSum - actualSum) : null;
     const reportingCount = item.inverters.size;
-    const isLowReporting = selectedInverter === 'all' && reportingCount < totalInvertersExpected;
+    const isLowReporting = selectedInverter === 'all' && reportingCount < expectedFleetCount;
     const isAnomaly = item.anomalies.length > 0;
     const anomalyReason = isAnomaly ? item.anomalies.map((a) => a.reason).join('; ') : null;
 
@@ -260,8 +284,8 @@ export function generateChartSeries(
       formattedTime,
       formattedDate,
       actualPower: Number(actualSum.toFixed(1)),
-      expectedPower: Number(expectedSum.toFixed(1)),
-      shortfall: Number(shortfall.toFixed(1)),
+      expectedPower: expectedSum !== null ? Number(expectedSum.toFixed(1)) : null,
+      shortfall: shortfall !== null ? Number(shortfall.toFixed(1)) : null,
       irradiation: avgIrrad,
       moduleTemp: avgModTemp,
       reportingCount,
@@ -271,17 +295,13 @@ export function generateChartSeries(
     });
   }
 
-  // Downsample if dataset is very large (> 2000 points) to maintain 60 FPS
-  if (result.length > 2000) {
-    return downsampleChartData(result, 1800);
+  if (result.length > 2500) {
+    return downsampleChartData(result, 2000);
   }
 
   return result;
 }
 
-/**
- * Intelligent downsampling that retains anomaly peaks and data gaps
- */
 function downsampleChartData(data: ChartDataPoint[], targetCount: number): ChartDataPoint[] {
   if (data.length <= targetCount) return data;
 
@@ -290,12 +310,10 @@ function downsampleChartData(data: ChartDataPoint[], targetCount: number): Chart
 
   for (let i = 0; i < data.length; i += factor) {
     const chunk = data.slice(i, i + factor);
-    // Always preserve anomalies or gaps if present in chunk
     const specialPoint = chunk.find((p) => p.isAnomaly || p.isGap || p.isLowReporting);
     if (specialPoint) {
       downsampled.push(specialPoint);
     } else {
-      // Pick representative point with max actualPower or midpoint
       const mid = chunk[Math.floor(chunk.length / 2)];
       downsampled.push(mid);
     }
@@ -305,7 +323,7 @@ function downsampleChartData(data: ChartDataPoint[], targetCount: number): Chart
 }
 
 /**
- * Compute health summaries for all inverters (sorted by energy loss descending)
+ * Compute health summaries for all inverters (sorted by energy loss descending).
  */
 export function computeInverterSummaries(records: SolarRecord[]): InverterHealth[] {
   const map = new Map<string, {
@@ -322,8 +340,13 @@ export function computeInverterSummaries(records: SolarRecord[]): InverterHealth
       entry = { actualKwh: 0, expectedKwh: 0, lossKwh: 0, faults: 0, lastTime: r.dateTime };
       map.set(r.sourceKey, entry);
     }
-    entry.actualKwh += r.acPower * 0.25;
-    entry.expectedKwh += r.expectedPower * 0.25;
+
+    const intervalH = r.samplingIntervalHours && r.samplingIntervalHours > 0 ? r.samplingIntervalHours : 0.25;
+
+    entry.actualKwh += r.acPower * intervalH;
+    if (!isNaN(r.expectedPower)) {
+      entry.expectedKwh += r.expectedPower * intervalH;
+    }
     entry.lossKwh += r.energyLossKwh;
     if (r.isAnomaly) {
       entry.faults++;
@@ -363,12 +386,11 @@ export function computeInverterSummaries(records: SolarRecord[]): InverterHealth
     });
   }
 
-  // Sort by energy loss descending
   return summaries.sort((a, b) => b.totalLossKwh - a.totalLossKwh);
 }
 
 /**
- * Extract anomaly alerts list from records
+ * Extract anomaly alerts list from records.
  */
 export function extractAnomalyAlerts(records: SolarRecord[]): AnomalyAlert[] {
   const alerts: AnomalyAlert[] = [];
@@ -382,9 +404,9 @@ export function extractAnomalyAlerts(records: SolarRecord[]): AnomalyAlert[] {
         dateTime: r.dateTime,
         inverterId: r.sourceKey,
         actualKw: Number(Math.max(0, r.acPower).toFixed(2)),
-        expectedKw: Number(Math.max(0, r.expectedPower).toFixed(2)),
+        expectedKw: Number((isNaN(r.expectedPower) ? 0 : Math.max(0, r.expectedPower)).toFixed(2)),
         lossKwh: Number(Math.max(0, r.energyLossKwh).toFixed(3)),
-        reason: r.anomalyReason || 'Unexplained daylight shortfall',
+        reason: r.anomalyReason || 'Daylight generation deficit',
         severity: r.severity || 'Medium',
         irradiation: r.irradiation,
         moduleTemp: r.moduleTemp,
@@ -392,196 +414,450 @@ export function extractAnomalyAlerts(records: SolarRecord[]): AnomalyAlert[] {
     }
   }
 
-  // Sort newest first by default
   return alerts.sort((a, b) => b.timestamp - a.timestamp);
 }
 
 /**
- * Parse CSV file uploaded in browser
+ * Robust timestamp parser supporting DD-MM-YYYY, YYYY-MM-DD, slashes, ISO, and times.
  */
-export interface ParseCsvResult {
-  success: boolean;
-  records?: SolarRecord[];
-  missingColumns?: string[];
-  error?: string;
-  rowCount?: number;
+export function parseTimestampToMs(dateStr: string): { timestamp: number; formatted: string; hour: number } | null {
+  if (!dateStr) return null;
+  const s = dateStr.trim().replace('T', ' ').replace('Z', '');
+
+  // 1. DD-MM-YYYY or DD/MM/YYYY: e.g. 15-05-2020 06:15
+  const dmyMatch = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (dmyMatch) {
+    const day = parseInt(dmyMatch[1], 10);
+    const month = parseInt(dmyMatch[2], 10) - 1;
+    const year = parseInt(dmyMatch[3], 10);
+    const hour = dmyMatch[4] ? parseInt(dmyMatch[4], 10) : 0;
+    const min = dmyMatch[5] ? parseInt(dmyMatch[5], 10) : 0;
+    const sec = dmyMatch[6] ? parseInt(dmyMatch[6], 10) : 0;
+    const d = new Date(year, month, day, hour, min, sec);
+    if (!isNaN(d.getTime())) {
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      const formatted = `${year}-${pad(month + 1)}-${pad(day)} ${pad(hour)}:${pad(min)}:${pad(sec)}`;
+      return { timestamp: d.getTime(), formatted, hour };
+    }
+  }
+
+  // 2. YYYY-MM-DD or YYYY/MM/DD: e.g. 2020-05-15 06:15:00
+  const ymdMatch = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (ymdMatch) {
+    const year = parseInt(ymdMatch[1], 10);
+    const month = parseInt(ymdMatch[2], 10) - 1;
+    const day = parseInt(ymdMatch[3], 10);
+    const hour = ymdMatch[4] ? parseInt(ymdMatch[4], 10) : 0;
+    const min = ymdMatch[5] ? parseInt(ymdMatch[5], 10) : 0;
+    const sec = ymdMatch[6] ? parseInt(ymdMatch[6], 10) : 0;
+    const d = new Date(year, month, day, hour, min, sec);
+    if (!isNaN(d.getTime())) {
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      const formatted = `${year}-${pad(month + 1)}-${pad(day)} ${pad(hour)}:${pad(min)}:${pad(sec)}`;
+      return { timestamp: d.getTime(), formatted, hour };
+    }
+  }
+
+  // Fallback to standard Date constructor
+  const fallback = new Date(s);
+  if (!isNaN(fallback.getTime())) {
+    return {
+      timestamp: fallback.getTime(),
+      formatted: fallback.toISOString().replace('T', ' ').substring(0, 19),
+      hour: fallback.getHours(),
+    };
+  }
+
+  return null;
 }
 
-export function parseSolarCsv(csvText: string, sensitivity = 0.25): Promise<ParseCsvResult> {
-  return new Promise((resolve) => {
-    Papa.parse<Record<string, string>>(csvText, {
+/**
+ * Flexible header cleaner: uppercase and stripped of spaces, underscores, and hyphens.
+ */
+function cleanHeader(h: string): string {
+  return h.trim().toUpperCase().replace(/[\s_-]+/g, '');
+}
+
+/**
+ * Dynamic parser for Generation and optional Weather CSV files.
+ * Can be called with (genCsv, sensitivity) or (genCsv, weatherCsv, sensitivity).
+ */
+export async function parseSolarCsv(
+  genCsvText: string,
+  weatherOrSensitivity?: string | number,
+  maybeSensitivity?: number
+): Promise<ParseCsvResult> {
+  const weatherCsvText = typeof weatherOrSensitivity === 'string' ? weatherOrSensitivity : undefined;
+  const sensitivity = typeof weatherOrSensitivity === 'number'
+    ? weatherOrSensitivity
+    : (maybeSensitivity ?? 0.25);
+
+  if (!genCsvText || !genCsvText.trim()) {
+    return { success: false, error: 'The uploaded generation CSV file is empty.' };
+  }
+
+  // 1. Parse Generation CSV
+  const genParsed = await new Promise<Papa.ParseResult<Record<string, string>>>((resolve, reject) => {
+    Papa.parse<Record<string, string>>(genCsvText, {
       header: true,
       skipEmptyLines: 'greedy',
-      complete: (results) => {
-        if (!results.data || results.data.length === 0) {
-          resolve({ success: false, error: 'The uploaded CSV file is empty.' });
-          return;
+      complete: resolve,
+      error: reject,
+    });
+  });
+
+  if (!genParsed.data || genParsed.data.length === 0) {
+    return { success: false, error: 'No data rows found in the uploaded generation CSV.' };
+  }
+
+  // Map Generation Headers
+  const genHeaders = genParsed.meta.fields || [];
+  const genHeaderMap = new Map<string, string>();
+  for (const h of genHeaders) {
+    genHeaderMap.set(cleanHeader(h), h);
+  }
+
+  const findGenCol = (synonyms: string[]): string | undefined => {
+    for (const syn of synonyms) {
+      const cleaned = cleanHeader(syn);
+      if (genHeaderMap.has(cleaned)) {
+        return genHeaderMap.get(cleaned);
+      }
+    }
+    return undefined;
+  };
+
+  const dateCol = findGenCol(['DATE_TIME', 'DATETIME', 'TIMESTAMP', 'DATE', 'TIME', 'DATE_AND_TIME']);
+  const invCol = findGenCol(['SOURCE_KEY', 'INVERTER', 'INVERTER_ID', 'KEY', 'SOURCE', 'DEVICE_ID', 'INV_ID']);
+  const acPowerCol = findGenCol(['AC_POWER', 'ACPOWER', 'POWER', 'ACTUAL_POWER', 'ACTUAL', 'GENERATION', 'AC', 'AC_KW']);
+
+  const missingCols: string[] = [];
+  if (!dateCol) missingCols.push('DATE_TIME');
+  if (!invCol) missingCols.push('SOURCE_KEY');
+  if (!acPowerCol) missingCols.push('AC_POWER');
+
+  if (missingCols.length > 0) {
+    return {
+      success: false,
+      missingColumns: missingCols,
+      error: `Missing required column(s): ${missingCols.join(', ')}. Please ensure your CSV includes timestamp, inverter ID, and AC power.`,
+    };
+  }
+
+  // Optional Generation columns
+  const dcPowerCol = findGenCol(['DC_POWER', 'DCPOWER', 'DC_OUTPUT', 'DC', 'DC_KW']);
+  const genIrradCol = findGenCol(['IRRADIATION', 'IRRAD', 'SUNLIGHT', 'SOLAR_IRRADIATION', 'RADIATION', 'GHI']);
+  const genAmbCol = findGenCol(['AMBIENT_TEMPERATURE', 'AMBIENT_TEMP', 'AMB_TEMP', 'AMBIENT']);
+  const genModCol = findGenCol(['MODULE_TEMPERATURE', 'MODULE_TEMP', 'MOD_TEMP', 'PANEL_TEMP']);
+
+  // 2. Parse Weather CSV if provided
+  const weatherMap = new Map<number, { irrad: number | null; amb: number | null; mod: number | null }>();
+
+  if (weatherCsvText && weatherCsvText.trim()) {
+    try {
+      const weatherParsed = await new Promise<Papa.ParseResult<Record<string, string>>>((resolve, reject) => {
+        Papa.parse<Record<string, string>>(weatherCsvText, {
+          header: true,
+          skipEmptyLines: 'greedy',
+          complete: resolve,
+          error: reject,
+        });
+      });
+
+      if (weatherParsed.data && weatherParsed.data.length > 0) {
+        const wHeaders = weatherParsed.meta.fields || [];
+        const wHeaderMap = new Map<string, string>();
+        for (const h of wHeaders) {
+          wHeaderMap.set(cleanHeader(h), h);
         }
 
-        const headers = results.meta.fields || [];
-        const normalizedHeaders = new Map<string, string>();
-        for (const h of headers) {
-          normalizedHeaders.set(h.trim().toUpperCase().replace(/[\s_-]+/g, ''), h);
-        }
-
-        // Column mapping matcher
-        const findColumn = (possibleNames: string[]): string | undefined => {
-          for (const name of possibleNames) {
-            const clean = name.toUpperCase().replace(/[\s_-]+/g, '');
-            if (normalizedHeaders.has(clean)) {
-              return normalizedHeaders.get(clean);
+        const findWCol = (synonyms: string[]): string | undefined => {
+          for (const syn of synonyms) {
+            const cleaned = cleanHeader(syn);
+            if (wHeaderMap.has(cleaned)) {
+              return wHeaderMap.get(cleaned);
             }
           }
           return undefined;
         };
 
-        const dateCol = findColumn(['DATE_TIME', 'DATETIME', 'TIMESTAMP', 'DATE', 'TIME']);
-        const invCol = findColumn(['SOURCE_KEY', 'INVERTER', 'INVERTER_ID', 'KEY', 'SOURCE']);
-        const acPowerCol = findColumn(['AC_POWER', 'ACPOWER', 'POWER', 'ACTUAL_POWER', 'ACTUAL']);
+        const wDateCol = findWCol(['DATE_TIME', 'DATETIME', 'TIMESTAMP', 'DATE', 'TIME']);
+        const wIrradCol = findWCol(['IRRADIATION', 'IRRAD', 'SUNLIGHT', 'SOLAR_IRRADIATION', 'RADIATION', 'GHI']);
+        const wAmbCol = findWCol(['AMBIENT_TEMPERATURE', 'AMBIENT_TEMP', 'AMB_TEMP', 'AMBIENT']);
+        const wModCol = findWCol(['MODULE_TEMPERATURE', 'MODULE_TEMP', 'MOD_TEMP', 'PANEL_TEMP']);
 
-        const missingCols: string[] = [];
-        if (!dateCol) missingCols.push('DATE_TIME');
-        if (!invCol) missingCols.push('SOURCE_KEY');
-        if (!acPowerCol) missingCols.push('AC_POWER');
+        if (wDateCol) {
+          for (const wRow of weatherParsed.data) {
+            const parsedWDate = parseTimestampToMs(wRow[wDateCol]);
+            if (!parsedWDate) continue;
 
-        if (missingCols.length > 0) {
-          resolve({
-            success: false,
-            missingColumns: missingCols,
-            error: `Missing required column(s): ${missingCols.join(', ')}. Please ensure your CSV includes DATE_TIME, SOURCE_KEY, and AC_POWER.`,
-          });
-          return;
+            const irrad = wIrradCol && wRow[wIrradCol] !== '' ? parseFloat(wRow[wIrradCol]) : null;
+            const amb = wAmbCol && wRow[wAmbCol] !== '' ? parseFloat(wRow[wAmbCol]) : null;
+            const mod = wModCol && wRow[wModCol] !== '' ? parseFloat(wRow[wModCol]) : null;
+
+            weatherMap.set(parsedWDate.timestamp, {
+              irrad: irrad !== null && !isNaN(irrad) ? Math.max(0, irrad) : null,
+              amb: amb !== null && !isNaN(amb) ? amb : null,
+              mod: mod !== null && !isNaN(mod) ? mod : null,
+            });
+          }
         }
+      }
+    } catch (wErr) {
+      console.warn('Weather CSV parse warning:', wErr);
+    }
+  }
 
-        // Optional columns
-        const irradCol = findColumn(['IRRADIATION', 'IRRAD', 'SUNLIGHT', 'SOLAR_IRRADIATION', 'RADIATION']);
-        const ambTempCol = findColumn(['AMBIENT_TEMPERATURE', 'AMBIENT_TEMP', 'AMB_TEMP', 'AMBIENT']);
-        const modTempCol = findColumn(['MODULE_TEMPERATURE', 'MODULE_TEMP', 'MOD_TEMP', 'PANEL_TEMP']);
-        const expCol = findColumn(['EXPECTED_POWER', 'EXPECTED', 'PREDICTED_POWER', 'P_EXP']);
-        const isAnomalyCol = findColumn(['IS_ANOMALY', 'ANOMALY', 'FAULT', 'IS_FAULT']);
-        const reasonCol = findColumn(['ANOMALY_REASON', 'REASON', 'FAULT_REASON', 'CAUSE']);
-        const lossCol = findColumn(['ENERGY_LOSS', 'ENERGY_LOSS_KWH', 'LOSS', 'SHORTFALL_KWH']);
+  // 3. First Pass: Ingest raw generation records
+  interface IntermediateRecord {
+    dateTime: string;
+    timestamp: number;
+    hour: number;
+    sourceKey: string;
+    acPower: number;
+    dcPower: number | null;
+    irradiation: number | null;
+    ambientTemp: number | null;
+    moduleTemp: number | null;
+  }
 
-        const parsedRecords: SolarRecord[] = [];
+  const rawList: IntermediateRecord[] = [];
+  const inverterTimestamps = new Map<string, number[]>();
 
-        for (let rowIdx = 0; rowIdx < results.data.length; rowIdx++) {
-          const row = results.data[rowIdx];
-          const rawDate = row[dateCol!];
-          const rawInv = row[invCol!];
-          const rawAc = row[acPowerCol!];
+  for (let i = 0; i < genParsed.data.length; i++) {
+    const row = genParsed.data[i];
+    const rawDate = row[dateCol!];
+    const rawInv = row[invCol!];
+    const rawAc = row[acPowerCol!];
 
-          if (!rawDate || !rawInv || rawAc === undefined || rawAc === '') {
-            continue;
-          }
+    if (!rawDate || !rawInv || rawAc === undefined || rawAc === '') continue;
 
-          // Parse timestamp
-          let parsedDate = new Date(rawDate);
-          if (isNaN(parsedDate.getTime())) {
-            // Handle DD-MM-YYYY or DD/MM/YYYY
-            const parts = rawDate.split(/[\s/T:-]+/);
-            if (parts.length >= 3) {
-              parsedDate = new Date(`${parts[0]}-${parts[1]}-${parts[2]}`);
-            }
-          }
-          const timestamp = isNaN(parsedDate.getTime()) ? Date.now() + rowIdx * 900000 : parsedDate.getTime();
-          const acPower = Math.max(0, parseFloat(rawAc) || 0);
+    const parsedDate = parseTimestampToMs(rawDate);
+    if (!parsedDate) continue;
 
-          // Weather values
-          const rawIrrad = irradCol && row[irradCol] !== '' && row[irradCol] !== null ? parseFloat(row[irradCol]) : null;
-          const rawAmb = ambTempCol && row[ambTempCol] !== '' && row[ambTempCol] !== null ? parseFloat(row[ambTempCol]) : null;
-          const rawMod = modTempCol && row[modTempCol] !== '' && row[modTempCol] !== null ? parseFloat(row[modTempCol]) : null;
+    const sourceKey = rawInv.trim();
+    const acPower = Math.max(0, parseFloat(rawAc) || 0);
 
-          const irradiation = rawIrrad !== null && !isNaN(rawIrrad) ? rawIrrad : null;
-          const ambientTemp = rawAmb !== null && !isNaN(rawAmb) ? rawAmb : null;
-          const moduleTemp = rawMod !== null && !isNaN(rawMod) ? rawMod : null;
+    const rawDc = dcPowerCol && row[dcPowerCol] !== '' ? parseFloat(row[dcPowerCol]) : null;
+    const dcPower = rawDc !== null && !isNaN(rawDc) ? Math.max(0, rawDc) : null;
 
-          // Expected power: use pre-existing or compute
-          let expectedPower = 0;
-          if (expCol && row[expCol] !== undefined && row[expCol] !== '') {
-            expectedPower = Math.max(0, parseFloat(row[expCol]) || 0);
-          } else {
-            expectedPower = calculateExpectedPower(irradiation, moduleTemp);
-          }
+    // Check weather from separate file first, fallback to generation CSV weather columns if present
+    const weatherData = weatherMap.get(parsedDate.timestamp);
 
-          // Anomaly & Reason: use pre-existing or compute
-          let isAnomaly = false;
-          let anomalyReason = '';
-          let severity: SeverityLevel | null = null;
+    let irradiation: number | null = null;
+    let ambientTemp: number | null = null;
+    let moduleTemp: number | null = null;
 
-          if (isAnomalyCol && row[isAnomalyCol] !== undefined && row[isAnomalyCol] !== '') {
-            const val = String(row[isAnomalyCol]).toLowerCase().trim();
-            isAnomaly = val === '1' || val === 'true' || val === 'yes' || val === 'y';
-            anomalyReason = reasonCol && row[reasonCol] ? row[reasonCol] : (isAnomaly ? 'Pre-flagged anomaly' : '');
-            severity = isAnomaly ? (acPower === 0 ? 'High' : 'Medium') : null;
-          } else {
-            const evaluated = evaluateAnomaly(acPower, expectedPower, irradiation, moduleTemp, sensitivity);
-            isAnomaly = evaluated.isAnomaly;
-            anomalyReason = evaluated.reason;
-            severity = evaluated.severity;
-          }
+    if (weatherData) {
+      irradiation = weatherData.irrad;
+      ambientTemp = weatherData.amb;
+      moduleTemp = weatherData.mod;
+    } else {
+      const rawI = genIrradCol && row[genIrradCol] !== '' ? parseFloat(row[genIrradCol]) : null;
+      const rawA = genAmbCol && row[genAmbCol] !== '' ? parseFloat(row[genAmbCol]) : null;
+      const rawM = genModCol && row[genModCol] !== '' ? parseFloat(row[genModCol]) : null;
+      irradiation = rawI !== null && !isNaN(rawI) ? Math.max(0, rawI) : null;
+      ambientTemp = rawA !== null && !isNaN(rawA) ? rawA : null;
+      moduleTemp = rawM !== null && !isNaN(rawM) ? rawM : null;
+    }
 
-          // Energy loss: use pre-existing or calculate
-          let energyLossKwh = 0;
-          if (lossCol && row[lossCol] !== undefined && row[lossCol] !== '') {
-            energyLossKwh = Math.max(0, parseFloat(row[lossCol]) || 0);
-          } else {
-            if (expectedPower > acPower && expectedPower > 1.0) {
-              energyLossKwh = Number(((expectedPower - acPower) * 0.25).toFixed(3));
-            }
-          }
-
-          // Strict night check
-          if (expectedPower <= 0.1 && (irradiation === null || irradiation < 0.005)) {
-            isAnomaly = false;
-            anomalyReason = '';
-            energyLossKwh = 0;
-            severity = null;
-          }
-
-          parsedRecords.push({
-            dateTime: rawDate,
-            timestamp,
-            sourceKey: rawInv.trim(),
-            acPower: Number(acPower.toFixed(2)),
-            irradiation,
-            ambientTemp,
-            moduleTemp,
-            expectedPower: Number(expectedPower.toFixed(2)),
-            isAnomaly,
-            anomalyReason,
-            energyLossKwh,
-            severity,
-          });
-        }
-
-        if (parsedRecords.length === 0) {
-          resolve({
-            success: false,
-            error: 'No valid data rows could be parsed from the CSV file.',
-          });
-          return;
-        }
-
-        resolve({
-          success: true,
-          records: parsedRecords,
-          rowCount: parsedRecords.length,
-        });
-      },
-      error: (err: any) => {
-        resolve({
-          success: false,
-          error: `Failed to parse CSV file: ${err?.message || 'Parsing error'}`,
-        });
-      },
+    rawList.push({
+      dateTime: parsedDate.formatted,
+      timestamp: parsedDate.timestamp,
+      hour: parsedDate.hour,
+      sourceKey,
+      acPower,
+      dcPower,
+      irradiation,
+      ambientTemp,
+      moduleTemp,
     });
-  });
+
+    let tsList = inverterTimestamps.get(sourceKey);
+    if (!tsList) {
+      tsList = [];
+      inverterTimestamps.set(sourceKey, tsList);
+    }
+    tsList.push(parsedDate.timestamp);
+  }
+
+  if (rawList.length === 0) {
+    return { success: false, error: 'No valid data rows could be parsed from the CSV file.' };
+  }
+
+  // 4. Determine Dynamic Sampling Interval
+  let detectedIntervalHours = 0.25; // default 15 minutes
+  const positiveDeltasMs: number[] = [];
+
+  for (const tsList of inverterTimestamps.values()) {
+    if (tsList.length > 1) {
+      tsList.sort((a, b) => a - b);
+      for (let j = 1; j < tsList.length; j++) {
+        const delta = tsList[j] - tsList[j - 1];
+        if (delta >= 60000 && delta <= 86400000) {
+          positiveDeltasMs.push(delta);
+        }
+      }
+    }
+  }
+
+  if (positiveDeltasMs.length > 0) {
+    positiveDeltasMs.sort((a, b) => a - b);
+    const midIdx = Math.floor(positiveDeltasMs.length / 2);
+    const medianMs = positiveDeltasMs[midIdx];
+    detectedIntervalHours = Number((medianMs / (1000 * 3600)).toFixed(4));
+    if (detectedIntervalHours <= 0) detectedIntervalHours = 0.25;
+  }
+
+  // 5. Group by Timestamp to Compute Dynamic Leave-One-Out Peer Baseline
+  const timepointMap = new Map<number, IntermediateRecord[]>();
+  for (const item of rawList) {
+    let list = timepointMap.get(item.timestamp);
+    if (!list) {
+      list = [];
+      timepointMap.set(item.timestamp, list);
+    }
+    list.push(item);
+  }
+
+  const finalRecords: SolarRecord[] = [];
+  let detectedAnomaliesCount = 0;
+
+  for (const itemsAtTime of timepointMap.values()) {
+    const count = itemsAtTime.length;
+    const fleetMax = Math.max(...itemsAtTime.map((it) => it.acPower));
+
+    for (let k = 0; k < count; k++) {
+      const current = itemsAtTime[k];
+      const actualKw = current.acPower;
+
+      // Daylight determination
+      let isDaylight = false;
+      if (current.irradiation !== null && current.irradiation > 0.02) {
+        isDaylight = true;
+      } else {
+        isDaylight = fleetMax > 10.0 || (current.hour >= 6 && current.hour <= 19);
+      }
+
+      // Dynamic Expected Power
+      let expectedPower = 0;
+      let isBaselineUnavailable = false;
+
+      if (count > 1) {
+        // Leave-one-out peer median (excludes current inverter)
+        const peerPowers: number[] = [];
+        for (let m = 0; m < count; m++) {
+          if (m !== k) {
+            peerPowers.push(itemsAtTime[m].acPower);
+          }
+        }
+        peerPowers.sort((a, b) => a - b);
+        const midP = Math.floor(peerPowers.length / 2);
+        const peerMedian = peerPowers.length % 2 === 0
+          ? (peerPowers[midP - 1] + peerPowers[midP]) / 2
+          : peerPowers[midP];
+
+        expectedPower = isDaylight ? peerMedian : 0;
+      } else {
+        // Only 1 inverter present
+        if (current.irradiation !== null && current.irradiation > 0.005) {
+          expectedPower = isDaylight
+            ? calculateExpectedPower(current.irradiation, current.moduleTemp)
+            : 0;
+        } else {
+          // Cannot calculate baseline
+          expectedPower = NaN;
+          isBaselineUnavailable = true;
+        }
+      }
+
+      // Energy Loss & Power Deficit
+      let powerDeficit = 0;
+      let energyLossKwh = 0;
+
+      if (!isNaN(expectedPower) && isDaylight && expectedPower > actualKw) {
+        powerDeficit = expectedPower - actualKw;
+        energyLossKwh = Number((powerDeficit * detectedIntervalHours).toFixed(3));
+      }
+
+      // Anomaly Detection
+      let isAnomaly = false;
+      let anomalyReason = '';
+      let severity: SeverityLevel | null = null;
+      let healthStatus = 'NORMAL_HEALTHY';
+
+      if (isBaselineUnavailable) {
+        healthStatus = 'INSUFFICIENT_DATA';
+        anomalyReason = 'Insufficient peer or weather data to calculate baseline';
+      } else if (!isDaylight) {
+        healthStatus = 'NORMAL_NIGHT';
+      } else {
+        const evaluated = evaluateAnomaly(
+          actualKw,
+          expectedPower,
+          current.irradiation,
+          current.moduleTemp,
+          sensitivity
+        );
+
+        isAnomaly = evaluated.isAnomaly;
+        anomalyReason = evaluated.reason;
+        severity = evaluated.severity;
+
+        if (actualKw <= 1.0 && expectedPower >= 30.0) {
+          healthStatus = 'CRITICAL_INVERTER_TRIP';
+        } else if (current.dcPower !== null && current.dcPower > 50.0 && actualKw <= 2.0) {
+          isAnomaly = true;
+          anomalyReason = 'Major Conversion Loss: DC power present but AC output near zero';
+          severity = 'High';
+          healthStatus = 'MAJOR_EFFICIENCY_LOSS';
+        } else if (isAnomaly) {
+          healthStatus = 'MODERATE_UNDERPERFORMANCE';
+        }
+      }
+
+      if (isAnomaly) {
+        detectedAnomaliesCount++;
+      }
+
+      finalRecords.push({
+        dateTime: current.dateTime,
+        timestamp: current.timestamp,
+        sourceKey: current.sourceKey,
+        acPower: Number(actualKw.toFixed(2)),
+        dcPower: current.dcPower,
+        irradiation: current.irradiation,
+        ambientTemp: current.ambientTemp,
+        moduleTemp: current.moduleTemp,
+        expectedPower: isNaN(expectedPower) ? 0 : Number(expectedPower.toFixed(2)),
+        isAnomaly,
+        anomalyReason,
+        energyLossKwh,
+        severity,
+        powerDeficit: Number(powerDeficit.toFixed(2)),
+        samplingIntervalHours: detectedIntervalHours,
+        healthStatus,
+      });
+    }
+  }
+
+  // Sort chronologically
+  finalRecords.sort((a, b) => a.timestamp - b.timestamp);
+
+  return {
+    success: true,
+    records: finalRecords,
+    rowCount: finalRecords.length,
+    samplingIntervalHours: detectedIntervalHours,
+    inverterCount: inverterTimestamps.size,
+    anomalyCount: detectedAnomaliesCount,
+  };
 }
 
 /**
- * Generate CSV text and trigger browser download for alerts
+ * Generate CSV text and trigger browser download for alerts.
  */
-export function exportAlertsToCsv(alerts: AnomalyAlert[], plantName = 'SolarWatch_Alerts') {
+export function exportAlertsToCsv(alerts: AnomalyAlert[], plantName = 'SolarSense_Alerts') {
   const headers = [
     'Timestamp',
     'Date_Time',
@@ -608,8 +884,8 @@ export function exportAlertsToCsv(alerts: AnomalyAlert[], plantName = 'SolarWatc
       shortfall,
       a.lossKwh.toFixed(3),
       a.severity,
-      a.irradiation !== null ? a.irradiation.toFixed(3) : 'no data',
-      a.moduleTemp !== null ? a.moduleTemp.toFixed(1) : 'no data',
+      a.irradiation !== null ? a.irradiation.toFixed(3) : '',
+      a.moduleTemp !== null ? a.moduleTemp.toFixed(1) : '',
     ].join(',');
   });
 
@@ -618,8 +894,7 @@ export function exportAlertsToCsv(alerts: AnomalyAlert[], plantName = 'SolarWatc
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);
-  const dateStamp = new Date().toISOString().substring(0, 10);
-  link.setAttribute('download', `${plantName}_${dateStamp}.csv`);
+  link.setAttribute('download', `${plantName}_${new Date().toISOString().substring(0, 10)}.csv`);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
