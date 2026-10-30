@@ -1,162 +1,122 @@
 import streamlit as st
 import pandas as pd
 
-from data_processing import process_plant_1_data
-from anomaly_detection import detect_solar_anomalies
+# Page Configuration
+st.set_page_config(page_title="Solar Sense AI", layout="wide", initial_sidebar_state="expanded")
 
-@st.cache_data
-def load_plant_data():
-    df, _ = process_plant_1_data(how="left")
-    analyzed_df, summary = detect_solar_anomalies(df)
-    return analyzed_df, summary
-
-try:
-    plant_df, anomaly_summary = load_plant_data()
-    data_loaded = True
-except Exception as e:
-    plant_df = pd.DataFrame()
-    anomaly_summary = {}
-    data_loaded = False
-    st.error(f"Could not load plant data: {e}")
-
-# Page setup
-st.set_page_config(
-    page_title="Solar Plant Health Dashboard",
-    page_icon="☀️",
-    layout="wide"
-)
-
-# Sidebar for testing inputs
-st.sidebar.header("⚙️ Test Plant Generation")
-st.sidebar.write("Adjust generation values to test dashboard scenarios:")
-
-expected_generation = st.sidebar.number_input(
-    "Expected Generation (kWh)",
-    min_value=0,
-    value=550,
-    step=10,
-    help="Target energy expected for the plant. Must be 0 or higher."
-)
-
-actual_generation = st.sidebar.number_input(
-    "Actual Generation (kWh)",
-    min_value=0,
-    value=483,
-    step=10,
-    help="Actual energy generated. Must be 0 or higher."
-)
-
-# Dynamic calculations (handling expected_generation = 0 safely)
-if expected_generation > 0:
-    energy_loss = max(0, expected_generation - actual_generation)
-    loss_percentage = (energy_loss / expected_generation) * 100
-else:
-    energy_loss = 0
-    loss_percentage = 0.0
-
-# Header
-st.title("☀️ Solar Plant Health Dashboard")
-st.write("Monitor solar generation and identify unusual performance.")
-
-st.divider()
-
-# --- Section 1: Plant Overview ---
-st.subheader("Plant Overview")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Actual Generation", f"{actual_generation} kWh")
-col2.metric("Expected Generation", f"{expected_generation} kWh")
-
-delta_text = f"-{loss_percentage:.1f}%" if loss_percentage > 0 else "0.0%"
-delta_color_mode = "inverse" if loss_percentage > 0 else "off"
-
-col3.metric(
-    "Energy Loss",
-    f"{energy_loss:.0f} kWh",
-    delta=delta_text,
-    delta_color=delta_color_mode
-)
-
-st.caption(f"Energy Loss: {loss_percentage:.1f}% of expected generation")
-
-st.divider()
-
-# --- Section 2: Solar Generation Analysis ---
-st.subheader("📊 Solar Generation Analysis")
-st.write("Daily comparison of expected vs. actual energy generation.")
-
-chart_data = pd.DataFrame({
-    "Day": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-    "Expected Generation (kWh)": [100, 110, 120, 115, 105],
-    "Actual Generation (kWh)": [95, 108, 80, 110, 90],
-})
-
-st.line_chart(chart_data.set_index("Day"))
-
-st.divider()
-
-# --- Section 3: Plant Health Status ---
-st.subheader("Plant Health Status")
-
-if expected_generation == 0:
-    st.info("ℹ️ Plant Status: Offline / No Expected Generation (0 kWh)")
-elif actual_generation >= expected_generation * 0.9:
-    st.success("Plant Status: Healthy")
-elif actual_generation >= expected_generation * 0.7:
-    st.warning("Plant Status: Needs Attention")
-else:
-    st.error("Plant Status: Low Generation")
-
-# --- Section 4: Alerts ---
-st.subheader("Alerts")
-
-if expected_generation == 0:
-    st.info("ℹ️ System Idle: Expected generation is set to 0 kWh.")
-elif actual_generation < expected_generation * 0.7:
-    st.error("🚨 Critical Alert: Actual generation is critically low (< 70% of expected)!")
-elif actual_generation < expected_generation * 0.9:
-    st.warning("⚠️ Alert: Actual generation is below expected generation.")
-else:
-    st.success("✅ No performance alert. Generation is within the expected range.")
-
-# --- Section 5: Real Plant Data & Anomaly Detection ---
-st.divider()
-st.header("🔍 Real Plant Data & Anomaly Detection")
-
-if data_loaded:
-    st.success("Plant 1 dataset loaded successfully.")
-
-    total_records = anomaly_summary["total_records_analyzed"]
-    total_anomalies = anomaly_summary["anomalous_records_count"]
-    anomaly_rate = anomaly_summary["anomaly_rate_percent"]
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Readings Analyzed", f"{total_records:,}")
-    col2.metric("Detected Anomalies", f"{total_anomalies:,}")
-    col3.metric("Anomaly Rate", f"{anomaly_rate:.2f}%")
-
-    st.subheader("Inverter Health Status")
-    health_counts = (
-        plant_df["HEALTH_STATUS"]
-        .value_counts()
-        .rename_axis("Health Status")
-        .reset_index(name="Readings")
+# --- SIDEBAR NAVIGATION ---
+with st.sidebar:
+    st.markdown("### ☀️ SOLAR SENSE AI")
+    st.caption("MONITOR • DETECT • OPTIMIZE")
+    
+    selected_page = st.radio(
+        "Navigation",
+        ["Overview", "Plant Analytics", "Inverter Health", "Anomaly Detection", "Alerts", "Settings"],
+        index=5,  # Defaults to Settings for testing
+        label_visibility="collapsed"
     )
-    st.dataframe(health_counts, width="stretch", hide_index=True)
+    
+    st.divider()
+    st.caption("PLANT TELEMETRY CONTROLS")
+    inverter_scope = st.selectbox("Inverter Scope", ["All Inverters (Plant Total)", "Inverter 1", "Inverter 2"])
+    fault_sensitivity = st.slider("Fault Sensitivity", 10, 50, 25, format="%d%%")
+    weather_overlay = st.checkbox("Weather Overlay", value=True)
+    faults_only = st.checkbox("Faults Only", value=False)
 
-    st.subheader("Recent Anomaly Records")
-    anomalies = plant_df[plant_df["IS_ANOMALOUS"]].copy()
-    display_columns = [
-        "DATE_TIME",
-        "SOURCE_KEY",
-        "AC_POWER",
-        "IRRADIATION",
-        "HEALTH_STATUS",
-    ]
-    st.dataframe(
-        anomalies[display_columns].head(20),
-        width="stretch",
-        hide_index=True,
+# --- SETTINGS VIEW ---
+if selected_page == "Settings":
+    st.title("⚙️ System & Plant Settings")
+    st.caption("Configure your user profile, plant identifiers, telemetry data sources, and dashboard preferences.")
+    
+    # Create the 4 tabs with icons
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "👤 User Profile", 
+        "🆔 Customer & Plant ID", 
+        "🗄️ Data Management", 
+        "🎛️ Dashboard Configuration"
+    ])
+    
+    # 1. USER PROFILE
+    with tab1:
+        st.subheader("Operator Profile & Notifications")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.text_input("Operator Name", value="Riya Chauhan")
+            st.text_input("Email Address", value="operator@solarsense.ai")
+            st.selectbox("Role", ["Lead Plant Engineer", "Grid Operator", "System Administrator", "Viewer"])
+        with col2:
+            st.text_input("Contact Number", value="+91 98765 43210")
+            st.multiselect(
+                "Alert Notification Channels",
+                ["Email", "SMS", "WhatsApp", "In-App Push", "Webhook"],
+                default=["Email", "In-App Push"]
+            )
+            st.selectbox("Shift Schedule", ["Day Shift (06:00 - 18:00)", "Night Shift", "24/7 On-Call"])
+            
+        if st.button("Save Profile Changes", type="primary"):
+            st.success("User profile updated successfully!")
+
+    # 2. CUSTOMER ID & PLANT DETAILS
+    with tab2:
+        st.subheader("Customer ID & Solar Plant Metadata")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.text_input("Customer ID", value="CUST-SOLAR-2026-8841", disabled=True)
+            st.text_input("Plant Registration Code", value="IND-UP-PLANT-01")
+            st.number_input("Installed Capacity (MWp)", value=50.0, step=0.5)
+        with col2:
+            st.text_input("Grid Substation ID", value="SUB-NR-440KV")
+            st.text_input("Location Coordinates", value="26.8467° N, 80.9462° E")
+            st.text_input("API / SCADA Integration Key", value="sk_live_983749823749283", type="password")
+            
+        if st.button("Update Plant Metadata", type="primary"):
+            st.success("Customer and Plant ID settings saved!")
+
+    # 3. DATA MANAGEMENT
+    with tab3:
+        st.subheader("Telemetry Data & CSV Management")
+        st.info("Currently active dataset: **Plant_1_Generation_Data.csv** (68,778 readings loaded)")
+        
+        uploaded_file = st.file_uploader(
+            "Upload New Plant CSV File (Required columns: DATE_TIME, SOURCE_KEY, AC_POWER)", 
+            type=["csv"]
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.selectbox("Data Retention Policy", ["30 Days", "90 Days", "1 Year", "Archive Forever"], index=2)
+        with col2:
+            st.selectbox("Missing Data Imputation", ["Linear Interpolation", "Forward Fill", "Drop Null Rows"])
+        with col3:
+            st.selectbox("Sampling Frequency", ["15 Minutes (Default)", "5 Minutes", "1 Hour"])
+            
+        st.divider()
+        c1, c2 = st.columns([1, 4])
+        with c1:
+            if st.button("🗑️ Clear Cached Data"):
+                st.warning("Active dataset cache cleared.")
+        with c2:
+            if st.button("📥 Export Processed Telemetry (CSV)"):
+                st.success("Preparing download...")
+
+    # 4. DASHBOARD CONFIGURATION
+    with tab4:
+        st.subheader("UI Preferences & AI Anomaly Thresholds")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("##### Display & Refresh")
+            st.selectbox("Theme Mode", ["Dark Emerald (Default)", "High Contrast Dark", "Light Mode"])
+            st.selectbox("Auto-Refresh Interval", ["Off", "30 Seconds", "1 Minute", "5 Minutes", "15 Minutes"], index=2)
+            st.selectbox("Power Unit Display", ["kW (Kilowatts)", "MW (Megawatts)", "W (Watts)"])
+        with col2:
+            st.markdown("##### AI & Inverter Alert Rules")
+            st.slider("DC/AC Conversion Efficiency Alert Threshold (%)", 70, 99, 88)
+            st.slider("Inverter Over-Temperature Warning (°C)", 50, 90, 75)
+            st.toggle("Enable Predictive Maintenance Forecasting", value=True)
+            st.toggle("Auto-acknowledge minor low-irradiance warnings", value=False)
+            
+        if st.button("Apply Dashboard Configuration", type="primary"):
+            st.success("Dashboard configuration applied!")
     )
 else:
     st.warning("Real plant data could not be loaded. Check the error shown above.")
