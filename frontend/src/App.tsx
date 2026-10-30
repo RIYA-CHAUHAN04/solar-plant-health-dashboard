@@ -319,9 +319,8 @@ const [showProfileMenu, setShowProfileMenu] = useState<boolean>(false);
       scrollToSection('inverter-matrix');
     } else if (tabId === 'anomalies' || tabId === 'alerts') {
       scrollToSection('fault-log');
-    } else if (tabId === 'settings') {
-      setIsUploadModalOpen(true);
     }
+    
   };
 
   return (
@@ -485,16 +484,7 @@ const [showProfileMenu, setShowProfileMenu] = useState<boolean>(false);
                 ) : (
                   <>
                     <p className="px-3 py-2 text-sm text-white">{userName}</p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowProfileMenu(false);
-                        handleTabChange('settings');
-                      }}
-                      className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-200 hover:bg-teal-900/40"
-                    >
-                      Settings
-                    </button>
+                   
                     <button
                       type="button"
                       onClick={() => {

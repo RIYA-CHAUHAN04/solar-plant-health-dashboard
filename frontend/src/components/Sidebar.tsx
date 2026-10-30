@@ -2,7 +2,7 @@
  * Sidebar component for Solar Sense AI.
  * Matches the design reference:
  * - Brand lockup: Radiant sun mark + "SOLAR SENSE AI" (Monitor • Detect • Optimize)
- * - Navigation links: Overview, Plant Analytics, Inverter Health, Anomaly Detection, Alerts, Settings
+ * - Navigation links: Overview, Plant Analytics, Inverter Health, Anomaly Detection, Alerts
  * - Bottom Clean Energy information badge & interactive controls
  */
 
@@ -14,7 +14,6 @@ import {
   Cpu,
   AlertTriangle,
   Bell,
-  Settings,
   Leaf,
   Sliders,
   Calendar,
@@ -64,7 +63,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'inverters', label: 'Inverter Health', icon: Cpu },
     { id: 'anomalies', label: 'Anomaly Detection', icon: AlertTriangle },
     { id: 'alerts', label: 'Alerts', icon: Bell, badge: alertsCount },
-    { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
   return (
